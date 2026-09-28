@@ -1,0 +1,36 @@
+# macOS
+.DS_Store
+
+# Xcode - user-specific
+xcuserdata/
+*.xcuserstate
+*.xccheckout
+*.xcscmblueprint
+
+# Build
+build/
+DerivedData/
+*.ipa
+*.dSYM
+*.dSYM.zip
+
+# Swift Package Manager
+.build/
+.swiftpm/
+Package.resolved
+
+# Xcode playgrounds
+timeline.xctimeline
+playground.xcworkspace
+
+# Local secrets / environment
+.env
+.env.*
+!.env.example
+*.secrets
+Secrets.swift
+
+# Temporary files
+*.tmp
+*.swp
+*~
