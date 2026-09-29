@@ -30,6 +30,7 @@ struct MattermostPost: Codable, Identifiable {
     let message: String
     let createAt: Int64
     let rootID: String?
+    let fileIDs: [String]?
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -38,6 +39,7 @@ struct MattermostPost: Codable, Identifiable {
         case message
         case createAt = "create_at"
         case rootID = "root_id"
+        case fileIDs = "file_ids"
     }
 }
 

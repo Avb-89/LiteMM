@@ -20,19 +20,46 @@ final class AppState {
 
     private var client: MattermostClient?
     private var webSocket: MattermostWebSocket?
+    private(set) var serverURL: URL?
 
     private(set) var connectionState: ConnectionState = .disconnected
     private(set) var currentUser: MattermostUser?
     private(set) var activeChats: [ActiveChat] = []
     var selectedChatID: String?
 
+    private(set) var availableChannels: [MattermostChannel] = []
+    private(set) var selectedChannelIDs: Set<String> = []
+
     private(set) var lastRawWebSocketEvent: String?
     var onIncomingAttention: (() -> Void)?
 
+
     init() {}
+
+    func setSelectedChannelIDs(_ channelIDs: Set<String>) {
+        selectedChannelIDs = channelIDs
+    }
+
+    func loadAvailableChannels() async throws -> [MattermostChannel] {
+        guard let client else {
+            throw AppStateError.notConfigured
+        }
+
+        let channels = try await client.availableChannels()
+            .filter { $0.type != "D" && $0.type != "G" }
+            .sorted {
+                let lhs = $0.displayName.isEmpty ? $0.name : $0.displayName
+                let rhs = $1.displayName.isEmpty ? $1.name : $1.displayName
+                return lhs.localizedCaseInsensitiveCompare(rhs) == .orderedAscending
+            }
+
+        availableChannels = channels
+        return channels
+    }
 
     func configure(serverURL: URL) {
         webSocket?.disconnect()
+        self.serverURL = serverURL
 
         let client = MattermostClient(baseURL: serverURL)
         let webSocket = MattermostWebSocket(baseURL: serverURL)
@@ -43,15 +70,15 @@ final class AppState {
             }
         }
 
-        webSocket.onDisconnect = { [weak self] error in
+        webSocket.onDisconnect = { [weak self] _ in
             Task { @MainActor [weak self] in
-                guard let self else { return }
+                self?.connectionState = .disconnected
+            }
+        }
 
-                if let error {
-                    self.connectionState = .failed(error.localizedDescription)
-                } else {
-                    self.connectionState = .disconnected
-                }
+        webSocket.onReconnect = { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.connectionState = .connected
             }
         }
 
@@ -166,14 +193,27 @@ final class AppState {
 
             let post = try JSONDecoder().decode(MattermostPost.self, from: postData)
 
-            guard isRelevantPostedEvent(postedData) else { return }
+            guard isRelevantPostedEvent(postedData, channelID: post.channelID) else { return }
 
-            let message = ChatMessage(post: post, currentUserID: currentUser.id)
+            let message = ChatMessage(
+                post: post,
+                currentUserID: currentUser.id,
+                authorName: postedData.senderName
+            )
 
             let title: String
-            if postedData.channelType == "D" || postedData.channelType == "G" {
-                title = postedData.senderName ?? postedData.channelDisplayName ?? "Mattermost"
-            } else {
+            switch postedData.channelType {
+            case "D":
+                if !message.isOwn {
+                    title = postedData.senderName ?? "Direct"
+                } else if let existingTitle = activeChats.first(where: { $0.channelID == post.channelID })?.title {
+                    title = existingTitle
+                } else {
+                    title = "Direct"
+                }
+            case "G":
+                title = "Group"
+            default:
                 title = postedData.channelDisplayName ?? "Mattermost"
             }
 
@@ -191,22 +231,15 @@ final class AppState {
         }
     }
 
-    private func isRelevantPostedEvent(_ data: MattermostWebSocketEvent.EventData) -> Bool {
+    private func isRelevantPostedEvent(
+        _ data: MattermostWebSocketEvent.EventData,
+        channelID: String
+    ) -> Bool {
         if data.channelType == "D" || data.channelType == "G" {
             return true
         }
 
-        guard let channelName = data.channelDisplayName else { return false }
-
-        let monitoredChannels = [
-            "Техподдержка",
-            "IT отдел",
-            "Бухгалтерия+Техподдержка"
-        ]
-
-        return monitoredChannels.contains {
-            channelName.caseInsensitiveCompare($0) == .orderedSame
-        }
+        return selectedChannelIDs.contains(channelID)
     }
 
     private func append(
@@ -215,6 +248,9 @@ final class AppState {
         fallbackTitle: String
     ) {
         if let index = activeChats.firstIndex(where: { $0.channelID == channelID }) {
+            if activeChats[index].title == "Direct", fallbackTitle != "Direct" {
+                activeChats[index].title = fallbackTitle
+            }
             activeChats[index].append(message)
             return
         }

@@ -54,6 +54,10 @@ final class MattermostClient {
         try await get("api/v4/channels/\(id)")
     }
 
+    func availableChannels() async throws -> [MattermostChannel] {
+        try await get("api/v4/users/me/channels")
+    }
+
     func sendPost(channelID: String, message: String) async throws -> MattermostPost {
         try await post(
             "api/v4/posts",

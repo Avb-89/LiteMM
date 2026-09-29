@@ -11,11 +11,17 @@ import AppKit
 struct ChatView: View {
     @Bindable var appState: AppState
     var onVisibilityChange: ((Bool) -> Void)?
+    @State private var controlsExpanded = false
 
     var body: some View {
         VStack(spacing: 0) {
             header
             Divider()
+
+            if controlsExpanded {
+                controlDrawer
+                Divider()
+            }
 
             if appState.activeChats.isEmpty {
                 emptyState
@@ -35,33 +41,59 @@ struct ChatView: View {
     }
 
     private var header: some View {
-        HStack(spacing: 8) {
-            connectionIndicator
+        Button {
+            withAnimation(.easeInOut(duration: 0.15)) {
+                controlsExpanded.toggle()
+            }
+        } label: {
+            HStack(spacing: 8) {
+                connectionIndicator
 
-            Text("LiteMM")
-                .font(.headline)
+                Text("LiteMM")
+                    .font(.headline)
+
+                Spacer()
+
+                Image(systemName: controlsExpanded ? "chevron.up" : "chevron.down")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+    }
+
+    private var controlDrawer: some View {
+        HStack(spacing: 12) {
+            SettingsLink {
+                Label("Settings", systemImage: "gearshape")
+            }
+            .buttonStyle(.plain)
 
             Spacer()
 
-            if !appState.activeChats.isEmpty {
-                Text("\(appState.activeChats.count)")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            Button {
+                if let serverURL = appState.serverURL {
+                    NSWorkspace.shared.open(serverURL)
+                }
+            } label: {
+                Label("Mattermost", systemImage: "globe")
             }
+            .buttonStyle(.plain)
+
+            Spacer()
 
             Button {
                 NSApplication.shared.terminate(nil)
             } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 18, height: 18)
+                Label("Exit", systemImage: "power")
             }
             .buttonStyle(.plain)
-            .help("Quit LiteMM")
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 9)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
     }
 
     private var connectionIndicator: some View {
@@ -200,15 +232,70 @@ struct ChatView: View {
     }
 
     private func messageRow(_ message: ChatMessage) -> some View {
-        VStack(alignment: message.isOwn ? .trailing : .leading, spacing: 3) {
-            Text(message.text)
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: message.isOwn ? .trailing : .leading)
-
+        HStack(alignment: .firstTextBaseline, spacing: 4) {
             Text(message.createdAt, style: .time)
                 .font(.caption2)
                 .foregroundStyle(.secondary)
+
+            Text(message.isOwn ? "me:" : "\(message.authorName ?? "unknown"):")
+                .font(.caption)
+                .fontWeight(.semibold)
+                .foregroundStyle(.secondary)
+
+            if !message.text.isEmpty {
+                Text(linkifiedText(message.text))
+                    .textSelection(.enabled)
+                    .environment(\.openURL, OpenURLAction { url in
+                        NSWorkspace.shared.open(url)
+                        return .handled
+                    })
+            }
+
+            if message.hasAttachments {
+                Button {
+                    openMessageInMattermost(message)
+                } label: {
+                    Label("Attachment", systemImage: "paperclip")
+                        .font(.caption)
+                }
+                .buttonStyle(.plain)
+                .help("Open in Mattermost")
+            }
         }
+        .frame(
+            maxWidth: .infinity,
+            alignment: message.isOwn ? .trailing : .leading
+        )
+    }
+
+    private func openMessageInMattermost(_ message: ChatMessage) {
+        guard let serverURL = appState.serverURL else { return }
+        let url = serverURL.appending(path: "_redirect/pl/\(message.id)")
+        NSWorkspace.shared.open(url)
+    }
+
+    private func linkifiedText(_ text: String) -> AttributedString {
+        var attributed = AttributedString(text)
+
+        guard let detector = try? NSDataDetector(
+            types: NSTextCheckingResult.CheckingType.link.rawValue
+        ) else {
+            return attributed
+        }
+
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+
+        for match in detector.matches(in: text, options: [], range: range) {
+            guard let url = match.url,
+                  let stringRange = Range(match.range, in: text),
+                  let attributedRange = Range(stringRange, in: attributed) else {
+                continue
+            }
+
+            attributed[attributedRange].link = url
+        }
+
+        return attributed
     }
 
     private func scrollToLastMessage(

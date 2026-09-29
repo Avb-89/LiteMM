@@ -12,10 +12,15 @@ final class MattermostWebSocket {
     private let session: URLSession
     private var task: URLSessionWebSocketTask?
     private var receiveTask: Task<Void, Never>?
+    private var reconnectTask: Task<Void, Never>?
+    private var healthCheckTask: Task<Void, Never>?
+    private var token: String?
+    private var shouldReconnect = false
     private var sequence = 1
 
     var onText: ((String) -> Void)?
     var onDisconnect: ((Error?) -> Void)?
+    var onReconnect: (() -> Void)?
 
     init(
         baseURL: URL,
@@ -27,6 +32,23 @@ final class MattermostWebSocket {
 
     func connect(token: String) async throws {
         disconnect()
+        self.token = token
+        shouldReconnect = true
+        try await openConnection(token: token)
+    }
+
+    func disconnect() {
+        shouldReconnect = false
+        token = nil
+        healthCheckTask?.cancel()
+        healthCheckTask = nil
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        closeConnection()
+    }
+
+    private func openConnection(token: String) async throws {
+        closeConnection()
 
         guard var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false) else {
             throw MattermostWebSocketError.invalidURL
@@ -43,16 +65,52 @@ final class MattermostWebSocket {
         self.task = task
         task.resume()
 
-        try await sendAuthentication(token: token)
-        startReceiving()
+        do {
+            try await sendAuthentication(token: token)
+            try await verifyConnection()
+            startReceiving()
+            startHealthChecks()
+        } catch {
+            closeConnection()
+            throw error
+        }
     }
 
-    func disconnect() {
+    private func closeConnection() {
         receiveTask?.cancel()
         receiveTask = nil
         task?.cancel(with: .normalClosure, reason: nil)
         task = nil
         sequence = 1
+    }
+
+    private func scheduleReconnect() {
+        guard shouldReconnect,
+              reconnectTask == nil else { return }
+
+        reconnectTask = Task { [weak self] in
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(for: .seconds(2))
+                } catch {
+                    break
+                }
+
+                guard let self,
+                      self.shouldReconnect,
+                      let token = self.token else { break }
+
+                do {
+                    try await self.openConnection(token: token)
+                    self.onReconnect?()
+                    break
+                } catch {
+                    continue
+                }
+            }
+
+            self?.reconnectTask = nil
+        }
     }
 
     private func sendAuthentication(token: String) async throws {
@@ -70,6 +128,23 @@ final class MattermostWebSocket {
         let data = try JSONEncoder().encode(request)
         let text = String(decoding: data, as: UTF8.self)
         try await task.send(.string(text))
+    }
+
+    private func verifyConnection() async throws {
+        guard let task else {
+            throw MattermostWebSocketError.notConnected
+        }
+
+        let message = try await task.receive()
+
+        switch message {
+        case .string(let text):
+            onText?(text)
+        case .data(let data):
+            onText?(String(decoding: data, as: UTF8.self))
+        @unknown default:
+            break
+        }
     }
 
     private func startReceiving() {
@@ -91,8 +166,61 @@ final class MattermostWebSocket {
                     }
                 } catch {
                     if !Task.isCancelled {
+                        self.receiveTask = nil
+                        self.healthCheckTask?.cancel()
+                        self.healthCheckTask = nil
+                        self.task?.cancel(with: .normalClosure, reason: nil)
+                        self.task = nil
+                        self.sequence = 1
                         self.onDisconnect?(error)
+                        self.scheduleReconnect()
                     }
+                    return
+                }
+            }
+        }
+    }
+
+    private func startHealthChecks() {
+        healthCheckTask?.cancel()
+
+        healthCheckTask = Task { [weak self] in
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(for: .seconds(30))
+                } catch {
+                    return
+                }
+
+                guard let self,
+                      self.shouldReconnect else { return }
+
+                do {
+                    var request = URLRequest(
+                        url: self.baseURL.appending(path: "api/v4/users/me")
+                    )
+                    request.httpMethod = "GET"
+                    request.timeoutInterval = 5
+
+                    guard let token = self.token else { return }
+                    request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+
+                    let (_, response) = try await self.session.data(for: request)
+                    guard let httpResponse = response as? HTTPURLResponse,
+                          (200...299).contains(httpResponse.statusCode) else {
+                        throw MattermostWebSocketError.healthCheckFailed
+                    }
+                } catch {
+                    guard !Task.isCancelled else { return }
+
+                    self.healthCheckTask = nil
+                    self.receiveTask?.cancel()
+                    self.receiveTask = nil
+                    self.task?.cancel(with: .normalClosure, reason: nil)
+                    self.task = nil
+                    self.sequence = 1
+                    self.onDisconnect?(error)
+                    self.scheduleReconnect()
                     return
                 }
             }
@@ -113,6 +241,7 @@ private struct WebSocketAuthenticationRequest: Encodable {
 enum MattermostWebSocketError: LocalizedError {
     case invalidURL
     case notConnected
+    case healthCheckFailed
 
     var errorDescription: String? {
         switch self {
@@ -120,6 +249,8 @@ enum MattermostWebSocketError: LocalizedError {
             return "Unable to build the Mattermost WebSocket URL."
         case .notConnected:
             return "Mattermost WebSocket is not connected."
+        case .healthCheckFailed:
+            return "Mattermost health check failed."
         }
     }
 }

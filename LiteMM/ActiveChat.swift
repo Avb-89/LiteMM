@@ -13,13 +13,21 @@ struct ChatMessage: Identifiable, Equatable {
     let text: String
     let createdAt: Date
     let isOwn: Bool
+    let authorName: String?
+    let hasAttachments: Bool
 
-    init(post: MattermostPost, currentUserID: String) {
+    init(
+        post: MattermostPost,
+        currentUserID: String,
+        authorName: String? = nil
+    ) {
         id = post.id
         userID = post.userID
         text = post.message
         createdAt = Date(timeIntervalSince1970: TimeInterval(post.createAt) / 1000)
         isOwn = post.userID == currentUserID
+        self.authorName = authorName
+        hasAttachments = !(post.fileIDs ?? []).isEmpty
     }
 }
 

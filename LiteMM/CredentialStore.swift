@@ -17,6 +17,7 @@ struct StoredCredentials: Equatable {
 final class CredentialStore {
     private let service = "com.sitis.LiteMM"
     private let credentialsAccount = "mattermost.credentials"
+    private let selectedChannelsAccount = "mattermost.selectedChannels"
 
     func save(serverURL: URL, username: String, password: String) throws {
         let credentials = KeychainCredentials(
@@ -90,6 +91,59 @@ final class CredentialStore {
         )
     }
 
+    func saveSelectedChannelIDs(_ channelIDs: Set<String>) throws {
+        let data = try JSONEncoder().encode(Array(channelIDs).sorted())
+        let query = query(account: selectedChannelsAccount)
+        let attributes: [String: Any] = [
+            kSecValueData as String: data,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        ]
+
+        let updateStatus = SecItemUpdate(
+            query as CFDictionary,
+            attributes as CFDictionary
+        )
+
+        if updateStatus == errSecSuccess {
+            return
+        }
+
+        guard updateStatus == errSecItemNotFound else {
+            throw CredentialStoreError.keychain(updateStatus)
+        }
+
+        var addQuery = query
+        attributes.forEach { addQuery[$0.key] = $0.value }
+
+        let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
+        guard addStatus == errSecSuccess else {
+            throw CredentialStoreError.keychain(addStatus)
+        }
+    }
+
+    func loadSelectedChannelIDs() throws -> Set<String> {
+        var query = query(account: selectedChannelsAccount)
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+
+        if status == errSecItemNotFound {
+            return []
+        }
+
+        guard status == errSecSuccess else {
+            throw CredentialStoreError.keychain(status)
+        }
+
+        guard let data = result as? Data else {
+            throw CredentialStoreError.invalidData
+        }
+
+        return Set(try JSONDecoder().decode([String].self, from: data))
+    }
+
     func delete() throws {
         let status = SecItemDelete(baseQuery as CFDictionary)
 
@@ -99,10 +153,14 @@ final class CredentialStore {
     }
 
     private var baseQuery: [String: Any] {
+        query(account: credentialsAccount)
+    }
+
+    private func query(account: String) -> [String: Any] {
         [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
-            kSecAttrAccount as String: credentialsAccount
+            kSecAttrAccount as String: account
         ]
     }
 }
