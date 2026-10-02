@@ -222,10 +222,6 @@ final class AppState {
             if !message.isOwn {
                 onIncomingAttention?()
             }
-
-            if selectedChatID == nil {
-                selectedChatID = post.channelID
-            }
         } catch {
             print("[LiteMM WS decode] \(error.localizedDescription)")
         }

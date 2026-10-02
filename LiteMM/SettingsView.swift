@@ -88,6 +88,7 @@ struct SettingsView: View {
                 diagnosticRow("Load channels", state: channelsStep)
             }
 
+
             Section("About") {
                 LabeledContent("Application", value: "LiteMM")
                 LabeledContent("Author", value: "SITIS")
