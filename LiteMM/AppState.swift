@@ -244,10 +244,12 @@ final class AppState {
         fallbackTitle: String
     ) {
         if let index = activeChats.firstIndex(where: { $0.channelID == channelID }) {
-            if activeChats[index].title == "Direct", fallbackTitle != "Direct" {
-                activeChats[index].title = fallbackTitle
+            var chat = activeChats[index]
+            if chat.title == "Direct", fallbackTitle != "Direct" {
+                chat.title = fallbackTitle
             }
-            activeChats[index].append(message)
+            chat.append(message)
+            activeChats[index] = chat
             return
         }
 
@@ -258,6 +260,10 @@ final class AppState {
         )
         chat.append(message)
         activeChats.append(chat)
+
+        if selectedChatID == nil {
+            selectChat(channelID)
+        }
     }
 }
 

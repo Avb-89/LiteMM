@@ -25,9 +25,8 @@ struct ChatView: View {
 
             if appState.activeChats.isEmpty {
                 emptyState
-            } else if let selectedChatID = appState.selectedChatID,
-                      appState.activeChats.contains(where: { $0.channelID == selectedChatID }) {
-                chatContent(channelID: selectedChatID)
+            } else if let chat = appState.selectedChat {
+                chatContent(chat)
             } else {
                 emptyState
             }
@@ -149,17 +148,17 @@ struct ChatView: View {
     }
 
     @ViewBuilder
-    private func chatContent(channelID: String) -> some View {
+    private func chatContent(_ chat: ActiveChat) -> some View {
         VStack(spacing: 0) {
             chatTabs
             Divider()
-            messages(channelID: channelID)
+            messages(chat)
             Divider()
 
             MessageComposer { text in
-                try await appState.sendMessage(text, to: channelID)
+                try await appState.sendMessage(text, to: chat.channelID)
             } onClose: {
-                appState.closeChat(channelID)
+                appState.closeChat(chat.channelID)
             }
         }
     }
@@ -212,30 +211,22 @@ struct ChatView: View {
         )
     }
 
-    @ViewBuilder
-    private func messages(channelID: String) -> some View {
-        if let index = appState.activeChats.firstIndex(where: { $0.channelID == channelID }) {
-            let chat = appState.activeChats[index]
-
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 10) {
-                        ForEach(chat.messages) { message in
-                            messageRow(message)
-                                .id(message.id)
-                        }
+    private func messages(_ chat: ActiveChat) -> some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 10) {
+                    ForEach(chat.messages) { message in
+                        messageRow(message)
+                            .id(message.id)
                     }
-                    .padding(12)
                 }
-                .onAppear {
-                    scrollToLastMessage(in: chat, proxy: proxy)
-                }
-                .onChange(of: chat.messages.count) {
-                    guard let currentChat = appState.activeChats.first(where: { $0.channelID == channelID }) else {
-                        return
-                    }
-                    scrollToLastMessage(in: currentChat, proxy: proxy)
-                }
+                .padding(12)
+            }
+            .onAppear {
+                scrollToLastMessage(in: chat, proxy: proxy)
+            }
+            .onChange(of: chat.messages.count) {
+                scrollToLastMessage(in: chat, proxy: proxy)
             }
         }
     }
