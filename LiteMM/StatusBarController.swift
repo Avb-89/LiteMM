@@ -46,7 +46,9 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
             return
         }
 
-        appState.selectOldestUnseenChat()
+        if appState.selectedChatID == nil {
+            appState.selectOldestUnseenChat()
+        }
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         NSApp.activate(ignoringOtherApps: true)
     }

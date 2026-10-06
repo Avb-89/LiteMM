@@ -214,7 +214,7 @@ struct ChatView: View {
     private func messages(_ chat: ActiveChat) -> some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 10) {
+                VStack(alignment: .leading, spacing: 10) {
                     ForEach(chat.messages) { message in
                         messageRow(message)
                             .id(message.id)
