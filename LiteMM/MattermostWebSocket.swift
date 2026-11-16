@@ -6,7 +6,9 @@
 //
 
 import Foundation
+import AppKit
 
+@MainActor
 final class MattermostWebSocket {
     private let baseURL: URL
     private let session: URLSession
@@ -14,13 +16,22 @@ final class MattermostWebSocket {
     private var receiveTask: Task<Void, Never>?
     private var reconnectTask: Task<Void, Never>?
     private var healthCheckTask: Task<Void, Never>?
+    private var openingTimeoutTask: Task<Void, Never>?
+    private var pingTimeoutTask: Task<Void, Never>?
+    private var connectionID = UUID()
+    private var reconnectID: UUID?
+    private var pendingPingID: UUID?
+    private var timedOutConnectionID: UUID?
+    private var powerObservers: [NSObjectProtocol] = []
+    private var isSleeping = false
     private var token: String?
     private var shouldReconnect = false
     private var sequence = 1
+    private(set) var isConnected = false
 
-    var onText: ((String) -> Void)?
-    var onDisconnect: ((Error?) -> Void)?
-    var onReconnect: (() -> Void)?
+    var onText: (@MainActor (String) -> Void)?
+    var onDisconnect: (@MainActor (Error?) -> Void)?
+    var onReconnect: (@MainActor () -> Void)?
 
     init(
         baseURL: URL,
@@ -35,15 +46,17 @@ final class MattermostWebSocket {
         self.token = token
         shouldReconnect = true
         try await openConnection(token: token)
+        observePowerChanges()
     }
 
     func disconnect() {
         shouldReconnect = false
         token = nil
-        healthCheckTask?.cancel()
-        healthCheckTask = nil
-        reconnectTask?.cancel()
-        reconnectTask = nil
+        isSleeping = false
+        let center = NSWorkspace.shared.notificationCenter
+        powerObservers.forEach { center.removeObserver($0) }
+        powerObservers.removeAll()
+        cancelReconnect()
         closeConnection()
     }
 
@@ -61,63 +74,105 @@ final class MattermostWebSocket {
             throw MattermostWebSocketError.invalidURL
         }
 
+        let id = connectionID
         let task = session.webSocketTask(with: url)
         self.task = task
+        openingTimeoutTask = Task { [weak self] in
+            do {
+                try await Task.sleep(for: .seconds(10))
+            } catch {
+                return
+            }
+            guard let self, self.connectionID == id else { return }
+            self.timedOutConnectionID = id
+            task.cancel()
+        }
         task.resume()
 
         do {
-            try await sendAuthentication(token: token)
-            try await verifyConnection()
-            startReceiving()
-            startHealthChecks()
+            let authSequence = try await sendAuthentication(token: token, task: task)
+            try await verifyConnection(task: task, connectionID: id, authSequence: authSequence)
+            try Task.checkCancellation()
+            guard connectionID == id, shouldReconnect, !isSleeping else { throw CancellationError() }
+            openingTimeoutTask?.cancel()
+            openingTimeoutTask = nil
+            isConnected = true
+            startReceiving(task: task, connectionID: id)
+            startHealthChecks(connectionID: id)
+            onReconnect?()
         } catch {
-            closeConnection()
+            let didTimeOut = timedOutConnectionID == id
+            if connectionID == id { closeConnection() }
+            if didTimeOut { throw MattermostWebSocketError.connectionTimedOut }
             throw error
         }
     }
 
     private func closeConnection() {
+        connectionID = UUID()
+        isConnected = false
         receiveTask?.cancel()
         receiveTask = nil
+        healthCheckTask?.cancel()
+        healthCheckTask = nil
+        openingTimeoutTask?.cancel()
+        openingTimeoutTask = nil
+        pingTimeoutTask?.cancel()
+        pingTimeoutTask = nil
+        pendingPingID = nil
+        timedOutConnectionID = nil
         task?.cancel(with: .normalClosure, reason: nil)
         task = nil
         sequence = 1
     }
 
-    private func scheduleReconnect() {
-        guard shouldReconnect,
+    private func cancelReconnect() {
+        reconnectID = nil
+        reconnectTask?.cancel()
+        reconnectTask = nil
+    }
+
+    private func scheduleReconnect(immediately: Bool = false) {
+        guard shouldReconnect, !isSleeping,
               reconnectTask == nil else { return }
 
+        let id = UUID()
+        reconnectID = id
         reconnectTask = Task { [weak self] in
-            while !Task.isCancelled {
-                do {
-                    try await Task.sleep(for: .seconds(2))
-                } catch {
-                    break
+            var needsDelay = !immediately
+            defer {
+                if self?.reconnectID == id {
+                    self?.reconnectTask = nil
+                    self?.reconnectID = nil
                 }
+            }
+            while !Task.isCancelled {
+                if needsDelay {
+                    do {
+                        try await Task.sleep(for: .seconds(2))
+                    } catch {
+                        return
+                    }
+                }
+                needsDelay = true
 
                 guard let self,
-                      self.shouldReconnect,
-                      let token = self.token else { break }
+                      self.shouldReconnect, !self.isSleeping,
+                      self.reconnectID == id,
+                      let token = self.token else { return }
 
                 do {
                     try await self.openConnection(token: token)
-                    self.onReconnect?()
-                    break
+                    return
                 } catch {
-                    continue
+                    guard !Task.isCancelled, self.reconnectID == id else { return }
                 }
             }
-
-            self?.reconnectTask = nil
         }
     }
 
-    private func sendAuthentication(token: String) async throws {
-        guard let task else {
-            throw MattermostWebSocketError.notConnected
-        }
-
+    private func sendAuthentication(token: String, task: URLSessionWebSocketTask) async throws -> Int {
+        let authSequence = sequence
         let request = WebSocketAuthenticationRequest(
             seq: sequence,
             action: "authentication_challenge",
@@ -128,52 +183,44 @@ final class MattermostWebSocket {
         let data = try JSONEncoder().encode(request)
         let text = String(decoding: data, as: UTF8.self)
         try await task.send(.string(text))
+        return authSequence
     }
 
-    private func verifyConnection() async throws {
-        guard let task else {
-            throw MattermostWebSocketError.notConnected
-        }
-
-        let message = try await task.receive()
-
-        switch message {
-        case .string(let text):
+    private func verifyConnection(
+        task: URLSessionWebSocketTask, connectionID id: UUID, authSequence: Int
+    ) async throws {
+        while !Task.isCancelled {
+            let message = try await task.receive()
+            guard connectionID == id, shouldReconnect else { throw CancellationError() }
+            guard let text = messageText(message) else { continue }
             onText?(text)
-        case .data(let data):
-            onText?(String(decoding: data, as: UTF8.self))
-        @unknown default:
-            break
+            guard let response = try JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any] else {
+                continue
+            }
+            if response["event"] as? String == "hello" { return }
+            guard response["seq_reply"] as? Int == authSequence else { continue }
+            guard response["status"] as? String == "OK" else {
+                throw MattermostWebSocketError.authenticationFailed
+            }
+            return
         }
+        throw CancellationError()
     }
 
-    private func startReceiving() {
+    private func startReceiving(task: URLSessionWebSocketTask, connectionID id: UUID) {
         receiveTask = Task { [weak self] in
             guard let self else { return }
 
             while !Task.isCancelled {
                 do {
-                    guard let task = self.task else { return }
                     let message = try await task.receive()
-
-                    switch message {
-                    case .string(let text):
+                    guard !Task.isCancelled, self.connectionID == id else { return }
+                    if let text = self.messageText(message) {
                         self.onText?(text)
-                    case .data(let data):
-                        self.onText?(String(decoding: data, as: UTF8.self))
-                    @unknown default:
-                        break
                     }
                 } catch {
                     if !Task.isCancelled {
-                        self.receiveTask = nil
-                        self.healthCheckTask?.cancel()
-                        self.healthCheckTask = nil
-                        self.task?.cancel(with: .normalClosure, reason: nil)
-                        self.task = nil
-                        self.sequence = 1
-                        self.onDisconnect?(error)
-                        self.scheduleReconnect()
+                        self.connectionFailed(error, connectionID: id)
                     }
                     return
                 }
@@ -181,49 +228,99 @@ final class MattermostWebSocket {
         }
     }
 
-    private func startHealthChecks() {
+    private func connectionFailed(_ error: Error, connectionID id: UUID) {
+        guard connectionID == id, shouldReconnect else { return }
+        closeConnection()
+        onDisconnect?(error)
+        scheduleReconnect()
+    }
+
+    private func startHealthChecks(connectionID id: UUID) {
         healthCheckTask?.cancel()
 
         healthCheckTask = Task { [weak self] in
             while !Task.isCancelled {
+                guard let self, self.connectionID == id, self.isConnected else { return }
+                self.checkWebSocket(connectionID: id)
                 do {
-                    try await Task.sleep(for: .seconds(30))
+                    try await Task.sleep(for: .seconds(15))
                 } catch {
-                    return
-                }
-
-                guard let self,
-                      self.shouldReconnect else { return }
-
-                do {
-                    var request = URLRequest(
-                        url: self.baseURL.appending(path: "api/v4/users/me")
-                    )
-                    request.httpMethod = "GET"
-                    request.timeoutInterval = 5
-
-                    guard let token = self.token else { return }
-                    request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-
-                    let (_, response) = try await self.session.data(for: request)
-                    guard let httpResponse = response as? HTTPURLResponse,
-                          (200...299).contains(httpResponse.statusCode) else {
-                        throw MattermostWebSocketError.healthCheckFailed
-                    }
-                } catch {
-                    guard !Task.isCancelled else { return }
-
-                    self.healthCheckTask = nil
-                    self.receiveTask?.cancel()
-                    self.receiveTask = nil
-                    self.task?.cancel(with: .normalClosure, reason: nil)
-                    self.task = nil
-                    self.sequence = 1
-                    self.onDisconnect?(error)
-                    self.scheduleReconnect()
                     return
                 }
             }
+        }
+    }
+
+    private func checkWebSocket(connectionID id: UUID) {
+        guard connectionID == id, isConnected, !isSleeping,
+              pendingPingID == nil, let task else { return }
+        let pingID = UUID()
+        pendingPingID = pingID
+        pingTimeoutTask = Task { [weak self] in
+            do {
+                try await Task.sleep(for: .seconds(8))
+            } catch {
+                return
+            }
+            guard let self, self.connectionID == id, self.pendingPingID == pingID else { return }
+            self.connectionFailed(MattermostWebSocketError.healthCheckFailed, connectionID: id)
+        }
+        task.sendPing { [weak self] error in
+            Task { @MainActor [weak self] in
+                guard let self, self.connectionID == id, self.pendingPingID == pingID else { return }
+                self.pingTimeoutTask?.cancel()
+                self.pingTimeoutTask = nil
+                self.pendingPingID = nil
+                if let error { self.connectionFailed(error, connectionID: id) }
+            }
+        }
+    }
+
+    private func observePowerChanges() {
+        guard powerObservers.isEmpty else { return }
+        let center = NSWorkspace.shared.notificationCenter
+        powerObservers.append(center.addObserver(
+            forName: NSWorkspace.willSleepNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.suspendForSleep() }
+        })
+        powerObservers.append(center.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.recoverAfterWake() }
+        })
+        powerObservers.append(center.addObserver(
+            forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.checkWebSocket(connectionID: self.connectionID)
+            }
+        })
+    }
+
+    private func suspendForSleep() {
+        guard shouldReconnect else { return }
+        isSleeping = true
+        cancelReconnect()
+        closeConnection()
+        onDisconnect?(nil)
+    }
+
+    private func recoverAfterWake() {
+        guard shouldReconnect, token != nil else { return }
+        isSleeping = false
+        cancelReconnect()
+        closeConnection()
+        onDisconnect?(nil)
+        scheduleReconnect(immediately: true)
+    }
+
+    private func messageText(_ message: URLSessionWebSocketTask.Message) -> String? {
+        switch message {
+        case .string(let text): return text
+        case .data(let data): return String(decoding: data, as: UTF8.self)
+        @unknown default: return nil
         }
     }
 }
@@ -242,6 +339,8 @@ enum MattermostWebSocketError: LocalizedError {
     case invalidURL
     case notConnected
     case healthCheckFailed
+    case connectionTimedOut
+    case authenticationFailed
 
     var errorDescription: String? {
         switch self {
@@ -250,7 +349,11 @@ enum MattermostWebSocketError: LocalizedError {
         case .notConnected:
             return "Mattermost WebSocket is not connected."
         case .healthCheckFailed:
-            return "Mattermost health check failed."
+            return "Mattermost WebSocket did not answer ping."
+        case .connectionTimedOut:
+            return "Mattermost WebSocket connection timed out."
+        case .authenticationFailed:
+            return "Mattermost WebSocket authentication failed."
         }
     }
 }

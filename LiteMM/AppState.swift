@@ -79,16 +79,14 @@ final class AppState {
             }
         }
 
-        webSocket.onDisconnect = { [weak self] _ in
-            Task { @MainActor [weak self] in
-                self?.connectionState = .disconnected
-            }
+        webSocket.onDisconnect = { [weak self, weak webSocket] _ in
+            guard let self, self.webSocket === webSocket else { return }
+            self.connectionState = .disconnected
         }
 
-        webSocket.onReconnect = { [weak self] in
-            Task { @MainActor [weak self] in
-                self?.connectionState = .connected
-            }
+        webSocket.onReconnect = { [weak self, weak webSocket] in
+            guard let self, self.webSocket === webSocket else { return }
+            self.connectionState = .connected
         }
 
         self.client = client
@@ -119,8 +117,10 @@ final class AppState {
                 historyRecorder.configureSession(serverURL: serverURL, userID: user.id, token: token)
             }
             try await webSocket.connect(token: token)
-            connectionState = .connected
+            guard self.webSocket === webSocket else { return }
+            connectionState = webSocket.isConnected ? .connected : .disconnected
         } catch {
+            guard self.webSocket === webSocket else { return }
             webSocket.disconnect()
             connectionState = .failed(error.localizedDescription)
         }
