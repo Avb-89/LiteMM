@@ -75,6 +75,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if let error = appState.prepareHistoryForExit() {
+            let alert = NSAlert()
+            alert.messageText = "Some History files could not be deleted"
+            alert.informativeText = error
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "Cancel")
+            alert.addButton(withTitle: "Quit Anyway")
+            if alert.runModal() == .alertFirstButtonReturn {
+                appState.cancelHistoryExit()
+                return .terminateCancel
+            }
+        }
+        return .terminateNow
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        appState.finishHistoryWrites()
+    }
+
     private func restoreAndConnect() async {
         do {
             guard let credentials = try credentialStore.load() else {

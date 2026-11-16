@@ -34,3 +34,5 @@ Secrets.swift
 *.tmp
 *.swp
 *~
+
+/CHANGELOG.md

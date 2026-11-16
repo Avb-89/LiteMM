@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import AppKit
 
 struct SettingsView: View {
     @Bindable var appState: AppState
@@ -76,6 +77,8 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+
+            HistorySettingsSection(settings: appState.historySettings)
 
             Section("Notifications") {
                 LabeledContent("Sound", value: "Coming later")
@@ -209,5 +212,61 @@ struct SettingsView: View {
         Bundle.main.object(
             forInfoDictionaryKey: "CFBundleShortVersionString"
         ) as? String ?? "—"
+    }
+}
+
+private struct HistorySettingsSection: View {
+    @Bindable var settings: HistorySettings
+
+    var body: some View {
+        Section("History") {
+            Toggle("Enable TXT history", isOn: $settings.isEnabled)
+                .disabled(settings.folderPath.isEmpty)
+
+            LabeledContent("Folder") {
+                VStack(alignment: .trailing, spacing: 6) {
+                    Text(settings.folderPath.isEmpty ? "Not selected" : settings.folderPath)
+                        .font(.caption)
+                        .textSelection(.enabled)
+                        .lineLimit(3)
+                        .help(settings.folderPath)
+                    Button("Choose…") { chooseFolder() }
+                }
+            }
+
+            Toggle("Keep history after closing a chat", isOn: $settings.keepAfterClosing)
+                .toggleStyle(.checkbox)
+
+            Text("Without this checkbox, closing a chat or quitting LiteMM deletes its TXT. Hiding the window does not.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Text("Only new messages are recorded. Existing messages are not exported.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            if let error = settings.lastError {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .textSelection(.enabled)
+            }
+        }
+    }
+
+    private func chooseFolder() {
+        NSApp.activate(ignoringOtherApps: true)
+        let panel = NSOpenPanel()
+        panel.title = "Choose a History folder"
+        panel.prompt = "Choose"
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true
+        if !settings.folderPath.isEmpty {
+            panel.directoryURL = URL(fileURLWithPath: settings.folderPath, isDirectory: true)
+        }
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        settings.selectFolder(url)
     }
 }

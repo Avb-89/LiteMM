@@ -21,6 +21,8 @@ final class AppState {
     private var client: MattermostClient?
     private var webSocket: MattermostWebSocket?
     private(set) var serverURL: URL?
+    private let historyRecorder: ChatHistoryRecorder
+    let historySettings: HistorySettings
 
     private(set) var connectionState: ConnectionState = .disconnected
     private(set) var currentUser: MattermostUser?
@@ -34,10 +36,15 @@ final class AppState {
     var onIncomingAttention: (() -> Void)?
 
 
-    init() {}
+    init() {
+        let recorder = ChatHistoryRecorder()
+        historyRecorder = recorder
+        historySettings = HistorySettings(recorder: recorder)
+    }
 
     func setSelectedChannelIDs(_ channelIDs: Set<String>) {
         selectedChannelIDs = channelIDs
+        historyRecorder.setSelectedChannelIDs(channelIDs)
     }
 
     func loadAvailableChannels() async throws -> [MattermostChannel] {
@@ -63,8 +70,10 @@ final class AppState {
 
         let client = MattermostClient(baseURL: serverURL)
         let webSocket = MattermostWebSocket(baseURL: serverURL)
+        let recorder = historyRecorder
 
         webSocket.onText = { [weak self] text in
+            recorder.recordWebSocketText(text)
             Task { @MainActor [weak self] in
                 self?.handleWebSocketText(text)
             }
@@ -106,6 +115,9 @@ final class AppState {
             }
 
             currentUser = user
+            if let serverURL {
+                historyRecorder.configureSession(serverURL: serverURL, userID: user.id, token: token)
+            }
             try await webSocket.connect(token: token)
             connectionState = .connected
         } catch {
@@ -117,6 +129,18 @@ final class AppState {
     func disconnect() {
         webSocket?.disconnect()
         connectionState = .disconnected
+    }
+
+    func finishHistoryWrites() {
+        historyRecorder.flush()
+    }
+
+    func prepareHistoryForExit() -> String? {
+        historyRecorder.finishSession()
+    }
+
+    func cancelHistoryExit() {
+        historyRecorder.cancelExit()
     }
 
     func selectChat(_ channelID: String) {
@@ -135,10 +159,11 @@ final class AppState {
             return
         }
 
-        selectChat(chat.channelID)
+        selectedChatID = chat.channelID
     }
 
     func closeChat(_ channelID: String) {
+        historyRecorder.closeChat(channelID)
         activeChats.removeAll { $0.channelID == channelID }
 
         guard selectedChatID == channelID else { return }
@@ -163,6 +188,10 @@ final class AppState {
         }
 
         let post = try await client.sendPost(channelID: channelID, message: message)
+        historyRecorder.recordSentPost(
+            id: post.id, channelID: post.channelID,
+            message: post.message, createdAt: post.createAt
+        )
         let chatMessage = ChatMessage(post: post, currentUserID: currentUser.id)
         append(chatMessage, to: channelID, fallbackTitle: "Mattermost")
     }
@@ -262,7 +291,7 @@ final class AppState {
         activeChats.append(chat)
 
         if selectedChatID == nil {
-            selectChat(channelID)
+            selectedChatID = channelID
         }
     }
 }
