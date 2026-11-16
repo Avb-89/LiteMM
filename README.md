@@ -48,4 +48,10 @@ LiteMM задуман как маленькое окно между работо
 
 **написали → увидел → ответил → закрыл.**
 
-Всё.
+## Запуск приложения
+
+1) Скачать из [Releases](https://github.com/Avb-89/LiteMM/releases) LiteMM.dmg
+2) Запустить LiteMM.dmg в нем будет файл и ссылка на Applications. 
+3) Перетащить LiteMM.app в /Applications 
+4) Открыть терминал и ввести там ```sudo xattr -rc /Applications/LiteMM.app``` это снимет блокировку приложения системой защиты apple.
+5) Запустить приложение обычным способом.
