@@ -194,6 +194,7 @@ final class AppState {
         )
         let chatMessage = ChatMessage(post: post, currentUserID: currentUser.id)
         append(chatMessage, to: channelID, fallbackTitle: "Mattermost")
+        markChatSeen(channelID)
     }
 
     var hasUnseenChats: Bool {

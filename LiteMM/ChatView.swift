@@ -159,6 +159,8 @@ struct ChatView: View {
                 try await appState.sendMessage(text, to: chat.channelID)
             } onClose: {
                 appState.closeChat(chat.channelID)
+            } onInputClick: {
+                appState.markChatSeen(chat.channelID)
             }
         }
     }
@@ -222,6 +224,10 @@ struct ChatView: View {
                 }
                 .padding(12)
             }
+            .contentShape(Rectangle())
+            .simultaneousGesture(TapGesture().onEnded {
+                appState.markChatSeen(chat.channelID)
+            })
             .onAppear {
                 scrollToLastMessage(in: chat, proxy: proxy)
             }

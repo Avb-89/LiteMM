@@ -11,6 +11,7 @@ import SwiftUI
 struct MessageComposer: View {
     let onSend: (String) async throws -> Void
     let onClose: () -> Void
+    let onInputClick: () -> Void
 
     @State private var text = ""
     @State private var isSending = false
@@ -18,7 +19,7 @@ struct MessageComposer: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            ComposerTextView(text: $text) {
+            ComposerTextView(text: $text, onClick: onInputClick) {
                 send()
             }
             .frame(height: 32)
@@ -79,6 +80,7 @@ struct MessageComposer: View {
 
 private struct ComposerTextView: NSViewRepresentable {
     @Binding var text: String
+    let onClick: () -> Void
     let onSend: () -> Void
 
     func makeCoordinator() -> Coordinator {
@@ -95,6 +97,7 @@ private struct ComposerTextView: NSViewRepresentable {
         let textView = ComposerNSTextView()
         textView.delegate = context.coordinator
         textView.onSend = onSend
+        textView.onClick = onClick
         textView.isRichText = false
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
@@ -116,6 +119,7 @@ private struct ComposerTextView: NSViewRepresentable {
         }
 
         textView.onSend = onSend
+        textView.onClick = onClick
 
         if textView.string != text {
             textView.string = text
@@ -138,6 +142,12 @@ private struct ComposerTextView: NSViewRepresentable {
 
 private final class ComposerNSTextView: NSTextView {
     var onSend: (() -> Void)?
+    var onClick: (() -> Void)?
+
+    override func mouseDown(with event: NSEvent) {
+        onClick?()
+        super.mouseDown(with: event)
+    }
 
     override func keyDown(with event: NSEvent) {
         let isReturn = event.keyCode == 36 || event.keyCode == 76
